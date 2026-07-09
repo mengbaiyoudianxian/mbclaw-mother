@@ -12,7 +12,7 @@ Use runtime.get_runtime() instead.
 
 import json, os, re
 from app.llm import LLMClient
-from app.memory import MemoryRepo
+from app.memory_legacy import MemoryRepo
 from app.tools import execute as exec_tool, bump_usage, list_tools
 from app.models import Message, Session as SessionModel
 from sqlalchemy.orm import Session as DBSession
@@ -58,17 +58,9 @@ THINK_RE = re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL)
 from dataclasses import dataclass, field
 from typing import Optional
 
-@dataclass
-class StandardMessage:
-    """跨渠道统一消息"""
-    role: str = 'user'
-    content: str = ''
-    channel: str = 'unknown'
-    user_id: str = ''
-    user_name: str = ''
-    session_id: str = ''
-    timestamp: float = 0.0
-    metadata: dict = field(default_factory=dict)
+# StandardMessage migrated to gateway/protocol.py (Task 20)
+# Re-export for backward compat
+from app.gateway.protocol import StandardMessage  # noqa: F401
 
 def _build_context(db: DBSession, session_id: int, user_msg: str) -> str:
     """Assemble context: memory hits + recent messages + tools."""

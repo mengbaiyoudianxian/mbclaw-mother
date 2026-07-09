@@ -1,4 +1,4 @@
-from app.agent import StandardMessage
+from app.gateway.protocol import StandardMessage  # migrated (Task 20)
 import uuid, time
 
 class MessageNormalizer:

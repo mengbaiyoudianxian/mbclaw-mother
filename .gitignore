@@ -2,8 +2,14 @@
 __pycache__
 *.pyc
 *.db
+*.sqlite
 *.log
 data/
 venv/
 .venv/
 heartbeat_logs/
+logs/
+cache/
+*.key
+token
+*.tar.gz

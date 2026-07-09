@@ -328,7 +328,7 @@ def execute(db: Session, tool_name: str, content: str) -> str:
             return out[:3000] or f"(退出码:{r.returncode})"
 
         elif tool_name == "search_memory":
-            from app.memory import MemoryRepo
+            from app.memory_legacy import MemoryRepo
             hits = MemoryRepo(db).query(content, top_n=5)
             return "\n".join(f"[#{h.session_id}] {h.summary[:200]} (score:{h.score:.2f})" for h in hits) or "未找到相关记忆"
 

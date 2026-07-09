@@ -25,7 +25,7 @@ class LLMRouter:
 
     def _call_via_tokenpool(self, messages, max_tokens) -> str:
         try:
-            from app.token_pool import get_pool
+            from app.token_pool_legacy import get_pool
             pool = get_pool()
             inst = [k for k in pool.keys if k.provider == "miclaw-bridge" and k.status == "working"]
             key = inst[0] if inst else pool.pick()

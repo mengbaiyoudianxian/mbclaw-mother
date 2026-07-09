@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.llm import LLMClient, LLMError, get_llm
-from app.memory import MemoryRepo
+from app.memory_legacy import MemoryRepo
 from app.models import Message, Session as SessionModel  # orchestrator-only
 from app.pipeline import close_session
 from app.agent import agent_run
@@ -228,7 +228,6 @@ def agent_chat(req: AgentRequest, db: Session = Depends(get_db), llm: LLMClient 
     if not session:
         session = SessionModel(title="Agent Chat", status="active")
         db.add(session); db.commit(); db.refresh(session)
-        record_session_created()
     try:
         return agent_run(db, session.id, req.message, llm, req.max_turns)
     except ValueError as e:

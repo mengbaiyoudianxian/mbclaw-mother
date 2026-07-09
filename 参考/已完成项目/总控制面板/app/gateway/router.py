@@ -1,5 +1,5 @@
 import asyncio
-from app.agent import StandardMessage
+from app.gateway.protocol import StandardMessage  # migrated (Task 20)
 from app.runtime import get_runtime
 
 class MessageRouter:

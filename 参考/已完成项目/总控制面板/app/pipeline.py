@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import jieba.analyse
 
 from app.llm import LLMClient, LLMOutput
-from app.memory import MemoryRepo
+from app.memory_legacy import MemoryRepo
 from app.models import Message, Session  # orchestrator-only imports
 
 

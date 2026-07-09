@@ -1,6 +1,6 @@
 # lazy import in bind_registry
 
-from app.agent import StandardMessage
+from app.gateway.protocol import StandardMessage  # migrated (Task 20)
 
 class ResponseDispatcher:
     def __init__(self):

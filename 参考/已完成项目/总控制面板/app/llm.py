@@ -60,7 +60,7 @@ class LLMClient:
         # Token Pool fallback
         if not self.api_key or not self.base_url:
             try:
-                from app.token_pool import get_pool
+                from app.token_pool_legacy import get_pool
                 best = get_pool().get_best_for_llm()
                 if best:
                     self.base_url = best[0]
