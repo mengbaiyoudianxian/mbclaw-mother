@@ -3,12 +3,12 @@ import re
 
 def handle_gateway_agent(msg: str, code: str) -> str:
     """Forward message to MotherRuntime, return reply."""
-    from app.mother_runtime import get_runtime
+    from app.runtime import get_runtime
     sid = abs(hash(f"gateway:{code}")) % 100000
 
     try:
         result = get_runtime().run(msg, session_id=sid, max_turns=5)
-        reply = result.get("reply", "")
+        reply = result.output
 
         # Strip markdown for QQ
         reply = re.sub(r'\*\*([^*]+)\*\*', r'\1', reply)

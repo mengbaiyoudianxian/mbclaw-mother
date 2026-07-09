@@ -1,6 +1,13 @@
-"""Agent Runtime — LLM-driven conversation loop with tool execution.
+"""Agent Runtime — backward-compat wrappers.
 
-Derived from agent_runtime.py. Uses MemoryRepo + tools module.
+All execution now flows through MotherRuntime (runtime/kernel.py).
+This file retains:
+  - StandardMessage dataclass (used by gateway modules)
+  - agent_run() wrapper → MotherRuntime.run()
+  - _build_context + AGENT_PROMPT (temporary compat)
+
+MotherAgent and get_mother() have been REMOVED.
+Use runtime.get_runtime() instead.
 """
 
 import json, os, re
@@ -92,112 +99,37 @@ def _build_context(db: DBSession, session_id: int, user_msg: str) -> str:
 
 
 def agent_run(db: DBSession, session_id: int, user_message: str, llm: LLMClient, max_turns: int = 5) -> dict:
-    """Execute one agent turn loop."""
+    """Backward-compat wrapper → MotherRuntime.run().
+
+    All execution now delegates to the single Runtime Kernel.
+    This wrapper preserves the original return format for api.py compatibility.
+    """
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise ValueError(f"Session {session_id} not found")
     if session.status == "closed":
         raise ValueError("Session is closed")
 
-    # Record user message
+    # Record user message (preserve original behavior)
     db.add(Message(session_id=session_id, role="user", content=user_message))
     db.commit()
 
-    tools = list_tools(db)
-    tools_text = "\n".join(f"- {t['name']} [{t.get('runtime','server')}]: {t['summary']}" for t in tools)
-    system_prompt = AGENT_PROMPT.format(tools_list=tools_text)
+    # Delegate to MotherRuntime
+    from app.runtime import get_runtime
+    result = get_runtime().run(message=user_message, session_id=session_id,
+                               max_turns=max_turns, llm_client=llm)
 
-    tools_used, thinking, turns = [], [], 0
-    current = user_message
-    final = ""
-
-    while turns < max_turns:
-        turns += 1
-        ctx = _build_context(db, session_id, current)
-
-        if os.getenv("MBCLAW_LLM_MOCK") == "1":
-            final = f"[MOCK Agent] 收到: {user_message[:100]}。第{turns}轮，上下文{len(ctx)}字符。"
-            break
-
-        try:
-            import httpx
-            resp = httpx.post(f"{llm.base_url}/chat/completions", headers={
-                "Content-Type": "application/json",
-                **({"Authorization": f"Bearer {llm.api_key}"} if llm.api_key else {})
-            }, json={"model": llm.model, "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"## 上下文\n{ctx}\n\n## 当前输入\n{current}"}
-            ], "temperature": 0.3, "max_tokens": 2000}, timeout=120)
-            resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            final = f"LLM调用失败: {e}"
-            break
-
-        # Parse
-        tool_matches = [(m.group(1).strip(), m.group(2).strip()) for m in TOOL_RE.finditer(raw)]
-        think_matches = [m.group(1).strip() for m in THINK_RE.finditer(raw)]
-        clean = TOOL_RE.sub('', raw)
-        clean = THINK_RE.sub('', clean).strip()
-        thinking.extend(think_matches)
-        final = clean
-
-        if tool_matches:
-            results = []
-            for tname, tcontent in tool_matches:
-                tools_used.append(tname)
-                bump_usage(db, tname)
-                r = exec_tool(db, tname, tcontent)
-                results.append(f"<tool-result name=\"{tname}\">\n{r}\n</tool-result>")
-                db.add(Message(session_id=session_id, role="assistant",
-                               content=f"[tool:{tname}] {r[:200]}"))
-            db.commit()
-            current = "工具执行结果:\n" + "\n".join(results)
-        else:
-            break
-
-    db.add(Message(session_id=session_id, role="assistant", content=final))
+    # Record assistant message
+    db.add(Message(session_id=session_id, role="assistant", content=result.output))
     db.commit()
 
-    return {"session_id": session_id, "response": final, "tools_used": tools_used,
-            "turns": turns, "thinking": thinking, "messages_added": turns + 1}
+    return {
+        "session_id": session_id,
+        "response": result.output,
+        "tools_used": result.metadata.get("tool_calls", []),
+        "turns": result.metadata.get("turns", 0),
+        "thinking": result.metadata.get("thinking", []),
+        "messages_added": 2,
+    }
 
 
-class MotherAgent:
-    """母体核心——接收跨渠道消息并回复"""
-    def __init__(self):
-        self.sessions = {}
-
-    async def enqueue(self, msg) -> bool:
-        """消息入队（同步实现，始终返回True）"""
-        return True
-
-    async def process_one(self, msg) -> str:
-        """处理单条消息"""
-        content = msg.content if hasattr(msg, 'content') else str(msg)
-        uid = msg.user_id if hasattr(msg, 'user_id') else 'unknown'
-        channel = msg.channel if hasattr(msg, 'channel') else 'unknown'
-        return self.send(uid, content, channel)
-
-    def send(self, user_id: str, message: str, channel: str = 'unknown') -> str:
-        """处理一条消息并返回回复"""
-        from app.llm import LLMClient
-        import os
-        try:
-            llm = LLMClient()
-            provider = os.environ.get('MBCLAW_PROVIDER', 'openai')
-            model = os.environ.get('MBCLAW_MODEL', '')
-            # 简单的单轮调用
-            msgs = [{"role": "user", "content": message}]
-            reply = llm.chat(msgs, model=model, provider=provider)
-            if isinstance(reply, dict):
-                return reply.get('content', str(reply))
-            return str(reply or '')
-        except Exception as e:
-            return f'[母体错误] {e}'
-
-def get_mother():
-    """获取母体实例（懒加载）"""
-    if not hasattr(get_mother, '_instance'):
-        get_mother._instance = MotherAgent()
-    return get_mother._instance
