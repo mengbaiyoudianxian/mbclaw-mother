@@ -107,7 +107,7 @@ def health_qqbot():
 
 @app.get("/health/tools")
 def health_tools():
-    """ToolRuntime v1.1 — 工具健康检查"""
+    """ToolRuntime v1.2 — 工具健康检查"""
     try:
         from app.runtime.kernel import get_runtime
         rt = get_runtime()
@@ -115,6 +115,31 @@ def health_tools():
         return report
     except Exception as e:
         return {"error": str(e), "timestamp": "", "tools": {}, "registry": {}}
+
+
+@app.get("/health/system")
+def health_system():
+    """Observer Layer — 完整MBOS状态报告"""
+    try:
+        from app.observer import ObserverAggregator
+        obs = ObserverAggregator()
+        return obs.full_report()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/health/capabilities")
+def health_capabilities():
+    """动态能力声明 — 从Registry生成"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        return {
+            "capability_prompt": rt.tool_registry.format_for_agent(),
+            "registry": rt.tool_registry.health_summary(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/gateway/wechat/login")

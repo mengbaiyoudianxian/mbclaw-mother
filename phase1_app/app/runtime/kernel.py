@@ -25,11 +25,12 @@ from .event import (
 from .event_bus import EventBus
 from app.capability import Capability, ToolDefinition
 from app.context import ContextEngine, WorkingMemory
+from app.execution_engine import ExecutionEngine
 from app.governor.governor import Governor
 from app.memory import Memory
 from app.planner import Planner
 from app.scheduler.scheduler import Scheduler
-from app.tool_runtime import ToolRuntime, ToolRegistry
+from app.tool_runtime import ToolRuntime, ToolRegistry, CommandRiskAnalyzer
 
 # ── Tool regex (kernel-level: used in _execute for LLM output parsing) ──
 TOOL_RE = re.compile(r'<tool>(.*?)</tool>\s*<content>(.*?)</content>', re.DOTALL)
@@ -65,8 +66,11 @@ class MotherRuntime:
         self.tool_registry = ToolRegistry()
         self.tool_runtime = ToolRuntime(capability=self.capability,
                                         registry=self.tool_registry)
+        self.execution_engine = ExecutionEngine(tool_runtime=self.tool_runtime,
+                                                registry=self.tool_registry)
+        # Bind ToolRegistry to ContextEngine for dynamic capability prompts
+        self.context_engine.set_registry(self.tool_registry)
         self._bootstrap_tools(db_session_factory)
-        # Gateway — unified entry layer (Task 20)
         # Lazy import to avoid circular: gateway/router.py imports app.runtime
         from app.gateway import Gateway
         self.gateway = Gateway(self)
@@ -203,28 +207,34 @@ class MotherRuntime:
             results = []
             for tname, tcontent in tms[:3]:
                 tools_used.append(tname)
-                # ── ToolRuntime v1.1: timeout, structured result, error recovery ──
-                tr = self.tool_runtime.execute(tname, tcontent)
+                # ── ExecutionEngine: policy check → ToolRuntime → result ──
+                dr = self.execution_engine.dispatch(tname, tcontent)
                 tool_details.append({
                     "tool": tname,
-                    "status": tr.status,
-                    "execution_time": tr.execution_time,
+                    "status": dr.status,
+                    "policy": dr.policy_action,
+                    "execution_time": dr.result.execution_time if dr.result else 0,
                 })
-                results.append(f"[{tname}] 结果:\n{tr.to_display()}")
+                if dr.result:
+                    results.append(f"[{tname}] 结果:\n{dr.result.to_display()}")
+                else:
+                    results.append(f"[{tname}] {dr.reason}")
 
-                # Error recovery: classify and decide
-                if tr.status != "success":
+                # Error recovery
+                if dr.status != "success":
                     consecutive_tool_errors += 1
-                    if tr.status == "timeout":
+                    if dr.status == "timeout":
                         results.append(f"[系统] {tname} 超时，请尝试简化命令或分步执行。")
-                    elif tr.status == "blocked":
-                        results.append(f"[系统] {tname} 被安全策略拦截，请使用其他方式。")
+                    elif dr.status == "denied":
+                        results.append(f"[系统] {tname} 被策略拒绝: {dr.reason}")
+                    elif dr.status == "blocked":
+                        results.append(f"[系统] {tname} 被安全策略拦截。")
                     else:
-                        results.append(f"[系统] {tname} 执行失败({tr.error_type}): {tr.error[:200]}")
+                        results.append(f"[系统] {tname} 执行失败: {dr.reason}")
                     if consecutive_tool_errors >= 3:
                         wm.add("assistant", clean or "[工具调用]")
                         wm.add("user", "\n".join(results))
-                        final_reply = f"多次工具调用失败，已停止。最近错误: {tr.error[:200]}"
+                        final_reply = f"多次工具调用失败，已停止。"
                         break
                 else:
                     consecutive_tool_errors = 0
@@ -252,12 +262,30 @@ class MotherRuntime:
           1. Skill-based: github_*, ssh_exec → app.skills.execute_skill
           2. External API placeholders → app.skills.api_placeholder
           3. DB-based fallback: all others → app.tools.execute
+          4. Control Plane: observation tools → app.tools.control_plane.execute
         """
-        # ── Register all tools in ToolRegistry ──
-        _core_tools = ["run_command", "read_file", "write_file", "edit_file",
-                       "list_directory", "search_memory"]
-        for tname in _core_tools:
-            self.tool_registry.register(tname, f"系统工具: {tname}", "root")
+        # ── Register all tools in ToolRegistry v2 (with category/risk/permission) ──
+        _core_tools = [
+            ("run_command",     "shell",      "HIGH",     "admin",    "执行Shell命令"),
+            ("read_file",       "file",       "LOW",      "read_only","读取文件内容"),
+            ("write_file",      "file",       "MEDIUM",   "write",    "写入文件"),
+            ("edit_file",       "file",       "MEDIUM",   "write",    "编辑文件"),
+            ("list_directory",  "file",       "LOW",      "read_only","列出目录"),
+            ("search_memory",   "memory",     "LOW",      "read_only","搜索记忆库"),
+            ("control_plane",   "observation","LOW",      "read_only","MBOS系统自检"),
+        ]
+        for tname, cat, risk, perm, desc in _core_tools:
+            self.tool_registry.register(tname, desc, category=cat,
+                                       risk_level=risk, permission=perm)
+
+        # ── Register control_plane handler ──
+        def _control_plane_handler(arg: str) -> str:
+            from app.tools.control_plane import execute as cp_execute
+            return cp_execute(arg.strip())
+
+        self.capability.register(ToolDefinition(
+            name="control_plane", description="MBOS系统自检",
+            handler=_control_plane_handler))
 
         # ── Skill-based tools ──
         def _make_skill_handler(name: str):
