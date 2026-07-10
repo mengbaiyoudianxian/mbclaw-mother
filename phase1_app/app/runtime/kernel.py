@@ -29,6 +29,7 @@ from app.governor.governor import Governor
 from app.memory import Memory
 from app.planner import Planner
 from app.scheduler.scheduler import Scheduler
+from app.tool_runtime import ToolRuntime, ToolRegistry
 
 # ── Tool regex (kernel-level: used in _execute for LLM output parsing) ──
 TOOL_RE = re.compile(r'<tool>(.*?)</tool>\s*<content>(.*?)</content>', re.DOTALL)
@@ -60,6 +61,10 @@ class MotherRuntime:
         self.planner = Planner()
         # Capability — tool registry and execution (Task 19)
         self.capability = Capability()
+        # ToolRegistry must be created BEFORE _bootstrap_tools (which registers into it)
+        self.tool_registry = ToolRegistry()
+        self.tool_runtime = ToolRuntime(capability=self.capability,
+                                        registry=self.tool_registry)
         self._bootstrap_tools(db_session_factory)
         # Gateway — unified entry layer (Task 20)
         # Lazy import to avoid circular: gateway/router.py imports app.runtime
@@ -151,7 +156,7 @@ class MotherRuntime:
 
     def _execute(self, message: str, session_id: int,
                  max_turns: int, llm_client=None) -> dict:
-        """Internal execution loop. Preserves ALL existing behavior."""
+        """Internal execution loop — ToolRuntime v1.1 integrated."""
         wm = self._get_session(session_id)
         wm.add("user", message)
 
@@ -167,8 +172,10 @@ class MotherRuntime:
             pass
 
         tools_used = []
+        tool_details = []
         final_reply = ""
         error_count = 0
+        consecutive_tool_errors = 0
 
         for turn in range(max_turns):
             # LLM call: dispatch via Scheduler (context from ContextEngine)
@@ -193,15 +200,34 @@ class MotherRuntime:
                 final_reply = clean
                 break
 
-            if turn >= 2:
-                final_reply = clean or "收到（母体-小梦已读）"
-                break
-
             results = []
             for tname, tcontent in tms[:3]:
                 tools_used.append(tname)
-                result = self.capability.execute(tname, tcontent)
-                results.append(f"[{tname}] 结果:\n{result[:600]}")
+                # ── ToolRuntime v1.1: timeout, structured result, error recovery ──
+                tr = self.tool_runtime.execute(tname, tcontent)
+                tool_details.append({
+                    "tool": tname,
+                    "status": tr.status,
+                    "execution_time": tr.execution_time,
+                })
+                results.append(f"[{tname}] 结果:\n{tr.to_display()}")
+
+                # Error recovery: classify and decide
+                if tr.status != "success":
+                    consecutive_tool_errors += 1
+                    if tr.status == "timeout":
+                        results.append(f"[系统] {tname} 超时，请尝试简化命令或分步执行。")
+                    elif tr.status == "blocked":
+                        results.append(f"[系统] {tname} 被安全策略拦截，请使用其他方式。")
+                    else:
+                        results.append(f"[系统] {tname} 执行失败({tr.error_type}): {tr.error[:200]}")
+                    if consecutive_tool_errors >= 3:
+                        wm.add("assistant", clean or "[工具调用]")
+                        wm.add("user", "\n".join(results))
+                        final_reply = f"多次工具调用失败，已停止。最近错误: {tr.error[:200]}"
+                        break
+                else:
+                    consecutive_tool_errors = 0
 
             wm.add("assistant", clean or "[工具调用]")
             wm.add("user", "工具执行结果:\n" + "\n".join(results))
@@ -216,7 +242,8 @@ class MotherRuntime:
         wm.add("assistant", final_reply)
         turn_count = turn + 1 if 'turn' in dir() else 0
         return {"reply": final_reply, "turns": turn_count,
-                "tool_calls": tools_used}
+                "tool_calls": tools_used,
+                "tool_details": tool_details}
 
     def _bootstrap_tools(self, db_session_factory):
         """Register tool handlers into Capability (Task 19).
@@ -226,6 +253,12 @@ class MotherRuntime:
           2. External API placeholders → app.skills.api_placeholder
           3. DB-based fallback: all others → app.tools.execute
         """
+        # ── Register all tools in ToolRegistry ──
+        _core_tools = ["run_command", "read_file", "write_file", "edit_file",
+                       "list_directory", "search_memory"]
+        for tname in _core_tools:
+            self.tool_registry.register(tname, f"系统工具: {tname}", "root")
+
         # ── Skill-based tools ──
         def _make_skill_handler(name: str):
             def _handler(arg: str) -> str:

@@ -105,6 +105,18 @@ def health_qqbot():
         }
 
 
+@app.get("/health/tools")
+def health_tools():
+    """ToolRuntime v1.1 — 工具健康检查"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        report = rt.tool_runtime.health_check()
+        return report
+    except Exception as e:
+        return {"error": str(e), "timestamp": "", "tools": {}, "registry": {}}
+
+
 @app.post("/gateway/wechat/login")
 async def wechat_login():
     """W4: 触发微信扫码登录（后台执行）"""

@@ -323,7 +323,7 @@ def execute(db: Session, tool_name: str, content: str) -> str:
             return "\n".join(f"{'[D]' if os.path.isdir(os.path.join(path,i)) else '[F]'} {i}" for i in sorted(items)[:100])
 
         elif tool_name == "run_command":
-            r = subprocess.run(content, shell=True, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(content, shell=True, capture_output=True, text=True, timeout=10)
             out = r.stdout + (f"\n[stderr]\n{r.stderr}" if r.stderr else "")
             return out[:3000] or f"(退出码:{r.returncode})"
 
