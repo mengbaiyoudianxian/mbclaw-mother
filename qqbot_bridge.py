@@ -112,9 +112,13 @@ def send_reply(reply: str, msg_type: str, target_id: str, token: str, msg_id: st
         url = f'https://{pref}api.sgroup.qq.com/v2/groups/{target_id}/messages'
         body = {'content': reply[:2000], 'msg_type': 0, 'msg_id': msg_id}
     try:
-        requests.post(url, headers=headers, json=body, timeout=10)
-    except Exception:
-        pass
+        r = requests.post(url, headers=headers, json=body, timeout=10)
+        if r.status_code == 200:
+            print(f'[qqbot] reply OK → {target_id[:12]}... {reply[:60]}', flush=True)
+        else:
+            print(f'[qqbot] reply FAIL {r.status_code}: {r.text[:200]}', flush=True)
+    except Exception as e:
+        print(f'[qqbot] reply ERROR: {e}', flush=True)
 
 
 async def forward_to_mother(msg_text: str, user_id: str) -> str:
@@ -135,7 +139,11 @@ async def forward_to_mother(msg_text: str, user_id: str) -> str:
             ),
         )
         if r.status_code == 200:
-            return r.json().get('reply', '')
+            reply = r.json().get('reply', '')
+            print(f'[qqbot] mother reply: {reply[:80]}', flush=True)
+            return reply
+        else:
+            print(f'[qqbot] mother FAIL {r.status_code}: {r.text[:200]}', flush=True)
     except Exception as e:
         print(f'[qqbot] mother error: {e}', flush=True)
     return '母体暂时无法回复'
@@ -209,6 +217,7 @@ async def connect_websocket():
                 hb_task = asyncio.create_task(heartbeat())
 
                 # Message loop
+                dispatch_count = 0
                 async for raw in ws:
                     p = json.loads(raw)
                     op = p.get('op', 0)
@@ -218,11 +227,19 @@ async def connect_websocket():
                     if op == 7:  # Reconnect
                         print('[qqbot] server requested reconnect', flush=True)
                         break
+                    if op == 10:  # Hello
+                        print(f'[qqbot] OP10 HELLO: {json.dumps(p)[:300]}', flush=True)
+                        continue
                     if op != 0:  # Not a dispatch
+                        print(f'[qqbot] UNKNOWN OP{op}: {json.dumps(p)[:300]}', flush=True)
                         continue
 
                     t = p.get('t', '')
                     d = p.get('d', {})
+                    dispatch_count += 1
+
+                    if dispatch_count <= 5:
+                        print(f'[qqbot] DISPATCH #{dispatch_count}: t={t} s={p.get("s","?")} payload={json.dumps(d)[:200]}', flush=True)
 
                     if t not in ('C2C_MESSAGE_CREATE', 'GROUP_AT_MESSAGE_CREATE'):
                         continue
