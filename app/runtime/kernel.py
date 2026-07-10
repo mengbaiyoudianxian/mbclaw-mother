@@ -369,6 +369,7 @@ class MBOSKernel:
         self.memory_bridge.process_audit_log(list(audit_log), task_graph.goal)
 
         # ── Sync state ──
+        self.worker_pool.release_all()
         self.state.set("current_goal", task_graph.goal)
         self.state.set("active_tasks", [t.id for t in task_graph.tasks])
 
