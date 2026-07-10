@@ -1,7 +1,6 @@
-"""MBOS Runtime — internal Event objects.
+"""MBOS Runtime — internal Event objects v2.
 
-5 event types. Notification only — not a control flow mechanism.
-Keep minimal. Add more only when a concrete listener requires it.
+v2: Added tool_call, tool_result, system_alert, token_low, worker_failed, memory_update.
 """
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,37 +24,79 @@ class Event:
 
 @dataclass
 class RequestEvent(Event):
-    """Emitted when MotherRuntime.run() receives a request."""
-    event_type: str = "request"
+    event_type: str = "user_message"
 
 
 @dataclass
 class ExecutionStartEvent(Event):
-    """Emitted when the agent loop begins execution."""
     event_type: str = "execution.start"
 
 
 @dataclass
 class ExecutionFinishEvent(Event):
-    """Emitted when execution completes successfully.
-
-    Carries the ExecutionResult — no separate ResultEvent needed.
-    """
     event_type: str = "execution.finish"
     result: Optional[ExecutionResult] = None
 
 
 @dataclass
 class ExecutionFailedEvent(Event):
-    """Emitted when execution terminates with an error."""
     event_type: str = "execution.failed"
     error: str = ""
 
 
 @dataclass
 class StateChangedEvent(Event):
-    """Emitted when ExecutionContext status changes.
-
-    Payload keys: old_status, new_status.
-    """
     event_type: str = "state.changed"
+
+
+@dataclass
+class ToolCallEvent(Event):
+    """Emitted before a tool is executed."""
+    event_type: str = "tool_call"
+    tool_name: str = ""
+    arguments: str = ""
+
+
+@dataclass
+class ToolResultEvent(Event):
+    """Emitted after a tool completes."""
+    event_type: str = "tool_result"
+    tool_name: str = ""
+    status: str = ""
+    elapsed_ms: float = 0.0
+    error: str = ""
+
+
+@dataclass
+class SystemAlertEvent(Event):
+    event_type: str = "system_alert"
+    severity: str = "info"  # info | warning | critical
+
+
+@dataclass
+class TokenLowEvent(Event):
+    event_type: str = "token_low"
+    provider: str = ""
+    remaining: int = 0
+
+
+@dataclass
+class WorkerFailedEvent(Event):
+    event_type: str = "worker_failed"
+    worker_id: str = ""
+    error: str = ""
+
+
+@dataclass
+class MemoryUpdateEvent(Event):
+    event_type: str = "memory_update"
+    key: str = ""
+    operation: str = "store"  # store | delete | update
+
+
+# ── Event type registry ─────────────────────────────────────
+ALL_EVENT_TYPES = [
+    "user_message", "execution.start", "execution.finish", "execution.failed",
+    "state.changed", "tool_call", "tool_result",
+    "system_alert", "token_low", "worker_failed", "memory_update",
+]

@@ -117,6 +117,50 @@ def health_tools():
         return {"error": str(e), "timestamp": "", "tools": {}, "registry": {}}
 
 
+@app.get("/health/governor")
+def health_governor():
+    """Governor v2 — 决策统计"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        return rt.governor.status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/health/scheduler")
+def health_scheduler():
+    """Scheduler v2 — 任务队列状态"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        return rt.scheduler.status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/health/workers")
+def health_workers():
+    """Worker Pool — Worker状态"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        return rt.worker_pool.status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/health/tokenpool")
+def health_tokenpool():
+    """TokenPool v2 — Provider状态 + 评分"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        return rt.scheduler.token_pool.status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/health/system")
 def health_system():
     """Observer Layer — 完整MBOS状态报告"""
@@ -138,6 +182,47 @@ def health_capabilities():
             "capability_prompt": rt.tool_registry.format_for_agent(),
             "registry": rt.tool_registry.health_summary(),
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/control/task")
+async def control_task(request: Request):
+    """POST /control/task — 创建任务"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        data = await request.json()
+        task_type = data.get("type", "llm")
+        priority = data.get("priority", 5)
+        payload = data.get("payload", {})
+        task = rt.scheduler.submit(task_type, payload, priority)
+        return {"task_id": task.task_id, "type": task.task_type,
+                "priority": task.priority, "status": task.status}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/control/action")
+async def control_action(request: Request):
+    """POST /control/action — 执行治理动作"""
+    try:
+        from app.runtime.kernel import get_runtime
+        rt = get_runtime()
+        data = await request.json()
+        action = data.get("action", "")
+        if action == "cleanup_workers":
+            rt.worker_pool.cleanup_failed()
+            return {"action": "cleanup_workers", "result": rt.worker_pool.status()}
+        elif action == "audit_stats":
+            return {"action": "audit_stats", "result": rt.auditor.stats()}
+        elif action == "scheduler_drain":
+            tasks = rt.scheduler.schedule()
+            results = [rt.scheduler.dispatch_task(t) for t in tasks]
+            return {"action": "scheduler_drain", "tasks": len(results), "results": results}
+        else:
+            return {"error": f"未知动作: {action}", "available": [
+                "cleanup_workers", "audit_stats", "scheduler_drain"]}
     except Exception as e:
         return {"error": str(e)}
 

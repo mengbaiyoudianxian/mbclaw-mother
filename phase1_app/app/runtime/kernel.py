@@ -10,6 +10,7 @@ DO NOT add: prompt building, memory storage, LLM routing, policy checks,
 Those belong to ContextEngine/Memory/Scheduler/Governor/Capability.
 """
 import re
+import time
 import uuid
 
 from .state import ExecutionContext, ExecutionResult, ExecutionStatus
@@ -21,16 +22,21 @@ from .event import (
     ExecutionFinishEvent,
     ExecutionFailedEvent,
     StateChangedEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    SystemAlertEvent,
 )
 from .event_bus import EventBus
+from app.audit import Auditor
 from app.capability import Capability, ToolDefinition
 from app.context import ContextEngine, WorkingMemory
 from app.execution_engine import ExecutionEngine
-from app.governor.governor import Governor
+from app.governor import Governor
 from app.memory import Memory
 from app.planner import Planner
 from app.scheduler.scheduler import Scheduler
 from app.tool_runtime import ToolRuntime, ToolRegistry, CommandRiskAnalyzer
+from app.workers import WorkerPool, WorkerType
 
 # ── Tool regex (kernel-level: used in _execute for LLM output parsing) ──
 TOOL_RE = re.compile(r'<tool>(.*?)</tool>\s*<content>(.*?)</content>', re.DOTALL)
@@ -68,8 +74,15 @@ class MotherRuntime:
                                         registry=self.tool_registry)
         self.execution_engine = ExecutionEngine(tool_runtime=self.tool_runtime,
                                                 registry=self.tool_registry)
-        # Bind ToolRegistry to ContextEngine for dynamic capability prompts
+        # Bind ToolRegistry to Governor and ContextEngine for v2 integration
+        self.governor._registry = self.tool_registry
         self.context_engine.set_registry(self.tool_registry)
+        # Worker Pool — managed execution workers
+        self.worker_pool = WorkerPool()
+        self.worker_pool.create(WorkerType.TOOL, count=4)
+        self.worker_pool.create(WorkerType.SYSTEM, count=2)
+        # Auditor — structured JSONL event log
+        self.auditor = Auditor()
         self._bootstrap_tools(db_session_factory)
         # Lazy import to avoid circular: gateway/router.py imports app.runtime
         from app.gateway import Gateway
@@ -207,11 +220,35 @@ class MotherRuntime:
             results = []
             for tname, tcontent in tms[:3]:
                 tools_used.append(tname)
+                # ── Governor evaluate (v2): tool-level risk assessment ──
+                gov_decision = self.governor.evaluate(tname, tcontent)
+                self.auditor.record_decision(gov_decision)
+                if gov_decision.required_action == "deny":
+                    tool_details.append({"tool": tname, "status": "denied",
+                                        "policy": "governor_deny"})
+                    results.append(f"[{tname}] 被Governor拒绝: {gov_decision.reason}")
+                    continue
+                # ── ToolCall event ──
+                ev = ToolCallEvent(event_id=str(uuid.uuid4()),
+                                   request_id=request_id, session_id=session_id,
+                                   tool_name=tname, arguments=tcontent[:500])
+                self.event_bus.emit(ev)
+                self.auditor.record(ev)
+                t0_tool = time.time()
                 # ── ExecutionEngine: policy check → ToolRuntime → result ──
                 dr = self.execution_engine.dispatch(tname, tcontent)
+                tool_elapsed = (time.time() - t0_tool) * 1000
+                # ── ToolResult event ──
+                rev = ToolResultEvent(event_id=str(uuid.uuid4()),
+                                      request_id=request_id, session_id=session_id,
+                                      tool_name=tname,
+                                      status=dr.status,
+                                      elapsed_ms=tool_elapsed,
+                                      error=dr.result.error if dr.result else "")
+                self.event_bus.emit(rev)
+                self.auditor.record(rev)
                 tool_details.append({
-                    "tool": tname,
-                    "status": dr.status,
+                    "tool": tname, "status": dr.status,
                     "policy": dr.policy_action,
                     "execution_time": dr.result.execution_time if dr.result else 0,
                 })

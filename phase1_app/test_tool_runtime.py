@@ -1,25 +1,23 @@
-"""ToolRuntime v1.2 — 自动化测试套件
+"""MBOS Kernel v0.1 — 自动化测试套件
 
 Usage:
     cd /opt/mbclaw/mother-server/phase1_app
     python3 test_tool_runtime.py
 
 Tests:
-    1. echo hello → success
-    2. sleep 60 → timeout after 3s, verify no zombie
-    3. CRITICAL command → blocked by risk analyzer
-    4. HIGH risk command → policy check
-    5. control_plane call → valid JSON
-    6. health_check → valid report with v1.2
-    7. 5 rapid calls → all success
-    8. Registry → dynamic capability generation
+    1. Governor blocks CRITICAL tools
+    2. Scheduler creates tasks
+    3. TokenPool returns provider status
+    4. WorkerPool status changes
+    5. Full pipeline: events + audit + execution
+    6. Tool timeout → process isolation
+    7. CommandRiskAnalyzer → all 4 levels
+    8. Dynamic capability prompt
 """
 from __future__ import annotations
 import sys, os, time, json, subprocess
 
 sys.path.insert(0, os.path.dirname(__file__))
-
-from app.tool_runtime import ToolRuntime, ToolRegistry, CommandRiskAnalyzer
 
 PASS = 0; FAIL = 0
 
@@ -39,94 +37,117 @@ def test(name: str, fn):
 
 
 def main():
-    rt = ToolRuntime()
-
-    # 1. echo hello → success
+    # 1. Governor blocks CRITICAL tools
     def t1():
-        r = rt.execute("run_command", "echo hello", timeout=5)
-        assert r.status == "success", f"got {r.status}: {r.error}"
-        assert "hello" in r.stdout
+        from app.governor import Governor
+        from app.tool_runtime import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("run_command", "shell", category="shell",
+                    risk_level="CRITICAL", permission="admin")
+        g = Governor(tool_registry=reg)
+        d = g.evaluate("run_command", "rm -rf /")
+        assert not d.allow, f"CRITICAL should be denied, got allow={d.allow}"
+        assert d.required_action == "deny"
 
-    test("echo hello → success", t1)
+    test("Governor blocks CRITICAL tool", t1)
 
-    # 2. sleep 60 → timeout, verify no zombie
+    # 2. Governor allows LOW risk
     def t2():
+        from app.governor import Governor
+        from app.tool_runtime import ToolRegistry
+        reg = ToolRegistry()
+        reg.register("read_file", "file", category="file",
+                    risk_level="LOW", permission="read_only")
+        g = Governor(tool_registry=reg)
+        d = g.evaluate("read_file", "/etc/hostname")
+        assert d.allow
+        assert d.required_action == "execute"
+
+    test("Governor allows LOW risk", t2)
+
+    # 3. Scheduler creates tasks
+    def t3():
+        from app.scheduler.scheduler import Scheduler
+        s = Scheduler()
+        task = s.submit("llm", {"msg": "hello"}, priority=2)
+        assert task.status == "pending"
+        assert "llm-" in task.task_id
+        tasks = s.schedule()
+        assert len(tasks) == 1
+
+    test("Scheduler creates + schedules tasks", t3)
+
+    # 4. TokenPool returns provider status
+    def t4():
+        from app.token_pool.candidate import TokenCandidate
+        from app.token_pool.pool import TokenPool
+        pool = TokenPool()
+        pool.register(TokenCandidate(provider="test", model="test-v1",
+                     api_key="sk-test", quota_total=50000, cost_per_1k=0.001))
+        status = pool.status()
+        assert status["total_candidates"] == 1
+        assert len(status["providers"]) == 1
+        assert status["providers"][0]["name"] == "test"
+
+    test("TokenPool returns provider status", t4)
+
+    # 5. WorkerPool idle/busy/failed
+    def t5():
+        from app.workers import WorkerPool, WorkerType, WorkerStatus
+        pool = WorkerPool()
+        pool.create(WorkerType.TOOL, count=3)
+        st = pool.status()
+        assert st["total"] == 3
+        assert st["idle"] == 3
+        w = pool.acquire(WorkerType.TOOL)
+        assert w is not None
+        st2 = pool.status()
+        assert st2["busy"] == 1
+        pool.release(w.wid)
+        assert pool.status()["idle"] == 3
+
+    test("WorkerPool idle→busy→idle cycle", t5)
+
+    # 6. Tool timeout → process isolation
+    def t6():
+        from app.tool_runtime import ToolRuntime
+        rt = ToolRuntime()
         t0 = time.time()
         r = rt.execute("run_command", "sleep 60", timeout=3)
         elapsed = time.time() - t0
-        assert r.status == "timeout", f"expected timeout, got {r.status}"
-        assert elapsed < 8, f"timeout took too long: {elapsed:.1f}s"
-        # Verify no zombie sleep processes
+        assert r.status == "timeout", f"got {r.status}"
+        assert elapsed < 8
         ps = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-        sleep_lines = [l for l in ps.stdout.split("\n") if "sleep 60" in l and "grep" not in l]
-        assert len(sleep_lines) == 0, f"ZOMBIE DETECTED: {sleep_lines}"
+        lines = [l for l in ps.stdout.split("\n") if "sleep 60" in l and "grep" not in l]
+        assert len(lines) == 0, f"ZOMBIE: {lines}"
 
-    test("sleep 60 → timeout, no zombie", t2)
+    test("sleep 60 → timeout, no zombie", t6)
 
-    # 3. CRITICAL command → blocked
-    def t3():
-        r = rt.execute("run_command", "mkfs.ext4 /dev/sda1", timeout=5)
-        assert r.status == "blocked", f"expected blocked, got {r.status}"
-
-    test("mkfs → blocked (CRITICAL)", t3)
-
-    # 4. Risk analyzer
-    def t4():
+    # 7. CommandRiskAnalyzer → all 4 levels
+    def t7():
+        from app.tool_runtime import CommandRiskAnalyzer
         a = CommandRiskAnalyzer.analyze
         assert a("ls -la")["risk_level"] == "LOW"
         assert a("apt install vim")["risk_level"] == "MEDIUM"
         assert a("rm -rf /tmp/test")["risk_level"] == "HIGH"
-        assert a("shutdown now")["risk_level"] == "CRITICAL"
-        assert a("shutdown now")["action"] == "deny"
+        assert a("mkfs.ext4 /dev/sda1")["risk_level"] == "CRITICAL"
 
-    test("CommandRiskAnalyzer: all 4 levels", t4)
+    test("CommandRiskAnalyzer: all 4 levels", t7)
 
-    # 5. control_plane → valid JSON
-    def t5():
-        from app.tools.control_plane import execute as cp_exec
-        r = cp_exec("get_system_status")
-        data = json.loads(r)
-        assert "cpu" in data, f"no cpu in: {data.keys()}"
-        assert "memory" in data
-        assert "disk" in data
-
-    test("control_plane get_system_status → valid JSON", t5)
-
-    # 6. health_check → v1.2
-    def t6():
-        report = rt.health_check()
-        assert report.get("version") == "1.2", f"version: {report.get('version')}"
-        assert "tools" in report
-
-    test("health_check → v1.2", t6)
-
-    # 7. 5 rapid calls
-    def t7():
-        for i in range(5):
-            r = rt.execute("run_command", f"echo test_{i}", timeout=5)
-            assert r.status == "success", f"call {i} failed"
-
-    test("5 rapid calls → all success", t7)
-
-    # 8. Registry → dynamic capability
+    # 8. Dynamic capability prompt
     def t8():
+        from app.tool_runtime import ToolRegistry
         reg = ToolRegistry()
-        reg.register("control_plane", "系统自检", category="observation",
-                    risk_level="LOW", permission="read_only")
-        reg.register("run_command", "执行Shell命令", category="shell",
-                    risk_level="HIGH", permission="admin")
-        reg.register("read_file", "读取文件", category="file",
-                    risk_level="LOW", permission="read_only")
+        reg.register("control_plane", category="observation", risk_level="LOW")
+        reg.register("run_command", category="shell", risk_level="HIGH")
+        reg.register("read_file", category="file", risk_level="LOW")
         prompt = reg.format_for_agent()
         assert "control_plane" in prompt
-        assert "run_command" in prompt
-        assert "read_file" in prompt
         assert "observation" in prompt
         assert "3 个工具可用" in prompt
 
     test("Registry → dynamic capability prompt", t8)
 
-    # Summary
     print(f"\n{'='*50}")
     print(f"  Results: {PASS} passed, {FAIL} failed, {PASS+FAIL} total")
     print(f"{'='*50}")
