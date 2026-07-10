@@ -1,0 +1,19 @@
+[Unit]
+Description=MBclaw QQ Bot Bridge
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mbclaw/mother-server
+EnvironmentFile=/opt/mbclaw/.env
+Environment=PYTHONPATH=/opt/mbclaw/mother-server:/opt/mbclaw/mother-server/phase1_app
+Environment=MOTHER_URL=http://127.0.0.1:8000
+ExecStart=/usr/bin/python3 -u /opt/mbclaw/mother-server/qqbot_bridge.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

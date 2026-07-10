@@ -1,0 +1,14 @@
+[Unit]
+Description=MBclaw Token Pool
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mbclaw/token_pool
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8100
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/opt/mbclaw/token_pool/.env
+
+[Install]
+WantedBy=multi-user.target

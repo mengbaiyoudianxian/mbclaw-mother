@@ -1,0 +1,20 @@
+[Unit]
+Description=MBclaw Mother Phase 1
+After=network.target network-online.target mbclaw-token-pool.service
+Wants=network-online.target mbclaw-token-pool.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mbclaw/mother-server
+EnvironmentFile=/opt/mbclaw/.env
+Environment=PYTHONPATH=/opt/mbclaw/mother-server:/opt/mbclaw/mother-server/phase1_app:/opt/mbclaw
+Environment=TOKEN_POOL_URL=http://127.0.0.1:8100
+Environment=MBCLAW_LLM_MOCK=0
+ExecStart=/usr/bin/python3 -u /opt/mbclaw/mother-server/run_phase1.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

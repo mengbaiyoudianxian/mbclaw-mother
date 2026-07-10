@@ -1,0 +1,26 @@
+# Sensitive
+.env
+*.key
+
+# Database
+*.db
+*.sqlite
+
+# Cache / temp
+__pycache__/
+*.pyc
+cache/
+tmp/
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
