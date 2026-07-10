@@ -1,9 +1,16 @@
-"""MBOS Kernel v0.2 — Cognitive Layer pipeline.
+"""MBOS Kernel v0.3 — Runtime Integration.
 
 Integrates the full MBOS pipeline:
   User Request → Gateway → EventKernel → Governor Constitution Check
   → Planner → TaskGraph → Scheduler → Worker Selection
-  → ExecutionEngine → ToolRuntime → Result → Audit → Memory Event
+  → ExecutionEngine → ToolRuntime → Result → Audit → Memory
+
+v0.3 upgrades:
+  - TokenPool HTTP Client (port 8100) with local fallback
+  - Global State Store (thread-safe)
+  - Memory Bridge (Audit → Memory persistence)
+  - Emergency Kill Switch (stop/resume)
+  - Production Health Check
 
 Maintains backward compatibility with V1 MotherRuntime interface.
 """
@@ -14,11 +21,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from app.governor import Governor, ExecutionContext, GovernorDecision, RiskLevel
+from app.governor import Governor, ExecutionContext, GovernorDecision, RiskLevel, EmergencyControl
 from app.planner import Planner, TaskGraph, TaskStatus
 from app.scheduler import Scheduler, ScheduleResult
 from app.worker import WorkerPool, create_llm_worker, create_tool_worker, create_system_worker
-from app.token_pool import ResourceManager, ProviderInfo, ModelInfo
+from app.token_pool import ResourceManager, ProviderInfo, ModelInfo, TokenPoolClient, TokenPoolStatus
 from app.runtime.event_bus import EventBus
 from app.runtime.event import (
     RequestEvent,
@@ -58,10 +65,16 @@ class PipelineResult:
 
 
 class MBOSKernel:
-    """MBOS Kernel v0.2 — Cognitive Layer orchestration.
+    """MBOS Kernel v0.3 — Cognitive Layer + Runtime Integration.
 
     Full pipeline:
-      Gateway → Governor → Planner → Scheduler → Workers → Audit
+      Gateway → Governor → Planner → Scheduler → Workers → Audit → Memory
+
+    v0.3 adds:
+      - TokenPool HTTP Client (port 8100) with local fallback
+      - Global State Store (thread-safe)
+      - Memory Bridge (Audit → Memory persistence)
+      - Emergency Kill Switch (stop/resume)
 
     Usage:
         kernel = MBOSKernel()
@@ -69,13 +82,23 @@ class MBOSKernel:
         print(result.reply)
     """
 
-    def __init__(self):
+    def __init__(self, token_pool_url: str = "http://127.0.0.1:8100"):
+        # ── Global State ──
+        from app.state import GlobalState
+        self.state = GlobalState.get_instance()
+
         # ── EventBus ──
         self.event_bus = EventBus()
         self._setup_audit()
 
         # ── Governor (Constitution Layer) ──
         self.governor = Governor()
+
+        # ── Emergency Control ──
+        self.emergency = EmergencyControl(
+            scheduler=None,  # Set after scheduler created
+            worker_pool=None,  # Set after worker pool created
+        )
 
         # ── Planner ──
         self.planner = Planner()
@@ -84,9 +107,15 @@ class MBOSKernel:
         self.worker_pool = WorkerPool()
         self._bootstrap_workers()
 
-        # ── Resource Manager ──
+        # ── Resource Manager (local fallback) ──
         self.resource_manager = ResourceManager()
         self._bootstrap_resources()
+
+        # ── TokenPool HTTP Client ──
+        self.token_pool = TokenPoolClient(
+            resource_manager=self.resource_manager,
+            base_url=token_pool_url,
+        )
 
         # ── Scheduler ──
         self.scheduler = Scheduler(
@@ -94,6 +123,20 @@ class MBOSKernel:
             resource_manager=self.resource_manager,
             event_bus=self.event_bus,
         )
+
+        # Wire emergency control to scheduler and worker pool
+        self.emergency._scheduler = self.scheduler
+        self.emergency._worker_pool = self.worker_pool
+
+        # ── Memory Bridge ──
+        from app.memory_bridge import MemoryBridge
+        self.memory_bridge = MemoryBridge(event_bus=self.event_bus)
+
+        # ── Update Global State ──
+        self._sync_state()
+
+        logger.info("MBOS Kernel v0.3 initialized — TokenPool: %s",
+                    self.token_pool.status.value)
 
     def _bootstrap_workers(self) -> None:
         """Register default workers."""
@@ -175,6 +218,27 @@ class MBOSKernel:
 
         self._audit_entries = audit_entries
 
+    def _sync_state(self) -> None:
+        """Sync GlobalState with current kernel state."""
+        self.state.update({
+            "current_goal": "",
+            "active_tasks": [],
+            "worker_status": [
+                {
+                    "worker_id": w.id,
+                    "status": w.status.value,
+                    "current_task": w.current_task or "",
+                    "capabilities": w.capabilities,
+                }
+                for w in self.worker_pool.list_all()
+            ],
+            "token_status": {
+                "connected": self.token_pool.is_connected,
+                "status": self.token_pool.status.value,
+            },
+            "system_health": {"status": "healthy"},
+        })
+
     def process(self, message: str, session_id: int = 0) -> PipelineResult:
         """Full cognitive pipeline execution.
 
@@ -221,11 +285,31 @@ class MBOSKernel:
                 session_id=session_id,
                 error=decision.reason,
             ))
+            # Store memory
+            self.memory_bridge.process_audit_log(list(audit_log), message)
             return PipelineResult(
                 success=False,
                 goal=message,
                 reply=f"请求被拒绝: {decision.reason}",
                 error=decision.reason,
+                audit_log=list(audit_log),
+            )
+
+        # ── Emergency Stop Check ──
+        if self.emergency.is_stopped():
+            err_msg = f"系统紧急停止中: {self.emergency.stop_reason}"
+            self.event_bus.publish(ExecutionFailedEvent(
+                event_id=str(uuid.uuid4()),
+                request_id=request_id,
+                session_id=session_id,
+                error=err_msg,
+            ))
+            self.memory_bridge.process_audit_log(list(audit_log), message)
+            return PipelineResult(
+                success=False,
+                goal=message,
+                reply=f"请求被拒绝: {err_msg}",
+                error=err_msg,
                 audit_log=list(audit_log),
             )
 
@@ -281,6 +365,13 @@ class MBOSKernel:
             },
         ))
 
+        # ── Memory Bridge: persist experience ──
+        self.memory_bridge.process_audit_log(list(audit_log), task_graph.goal)
+
+        # ── Sync state ──
+        self.state.set("current_goal", task_graph.goal)
+        self.state.set("active_tasks", [t.id for t in task_graph.tasks])
+
         # Build reply
         scheduled_count = sum(1 for r in schedule_results if r.success)
         failed_schedules = [r for r in schedule_results if not r.success]
@@ -314,11 +405,15 @@ class MBOSKernel:
         Returns:
             Dict with component statuses.
         """
+        tp_status = self.token_pool.status.value
+        tp_connected = self.token_pool.is_connected
         return {
-            "kernel": "MBOS Kernel v0.2",
+            "kernel": "MBOS Kernel v0.3",
             "governor": {
                 "rules": len(self.governor.list_rules()),
                 "status": "active",
+                "emergency_stop": self.emergency.is_stopped(),
+                "stop_reason": self.emergency.stop_reason,
             },
             "planner": {
                 "status": "active",
@@ -328,7 +423,10 @@ class MBOSKernel:
                 "total": len(self.worker_pool.list_all()),
                 "available": len(self.worker_pool.list_available()),
             },
-            "resource_manager": {
+            "token_pool": {
+                "connected": tp_connected,
+                "status": tp_status,
+                "last_error": self.token_pool.last_error if not tp_connected else "",
                 "providers": len(self.resource_manager.list_providers()),
                 "total_models": sum(
                     len(p.models) for p in self.resource_manager.list_providers()
@@ -339,5 +437,12 @@ class MBOSKernel:
             },
             "event_bus": {
                 "status": "active",
+            },
+            "memory": {
+                "entries": self.memory_bridge.memory_store.size(),
+            },
+            "state": {
+                "current_goal": self.state.get("current_goal", ""),
+                "active_tasks": self.state.get("active_tasks", []),
             },
         }

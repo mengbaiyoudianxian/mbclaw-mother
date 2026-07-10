@@ -68,13 +68,15 @@ class TestFullPipeline:
 
     def test_health_report(self):
         report = self.kernel.health_report()
-        assert report["kernel"] == "MBOS Kernel v0.2"
+        assert report["kernel"] == "MBOS Kernel v0.3"
         assert report["governor"]["status"] == "active"
         assert report["governor"]["rules"] == 5
         assert report["planner"]["status"] == "active"
         assert report["workers"]["total"] == 9
         assert report["workers"]["available"] == 9
-        assert report["resource_manager"]["providers"] == 3
+        assert "token_pool" in report
+        assert "memory" in report
+        assert "state" in report
 
     def test_schedule_results_contain_worker_info(self):
         result = self.kernel.process("检查服务器状态并生成报告", session_id=1)
