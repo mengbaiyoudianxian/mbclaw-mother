@@ -17,12 +17,30 @@ TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken'
 APPID = os.environ.get('QQ_BOT_APPID', '')
 SECRET = os.environ.get('QQ_BOT_SECRET', '')
 
-# Original intents that worked on Jul 9
-INTENTS = 402653184  # (1<<27)|(1<<28) = INTERACTION | MESSAGE_AUDIT
+# (1<<25)|(1<<27)|(1<<28) = GROUP_AND_C2C_EVENT | INTERACTION | MESSAGE_AUDIT
+INTENTS = 436207616
 SHARD = [0, 1]
 
 MAX_RECONNECT_DELAY = 300
 SESSION_FILE = '/tmp/mbclaw_qqbot_session.json'
+STATE_FILE = '/tmp/mbclaw_qqbot_state.json'
+
+
+def save_state(**kwargs):
+    """Write current QQBot state to a JSON file for Mother's /health/qqbot."""
+    try:
+        state = {
+            'websocket': kwargs.get('websocket', 'unknown'),
+            'bot_name': kwargs.get('bot_name', ''),
+            'session_id': kwargs.get('session_id', ''),
+            'last_message_time': kwargs.get('last_message_time', ''),
+            'last_error': kwargs.get('last_error', ''),
+            'updated': time.time(),
+        }
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f)
+    except Exception:
+        pass
 
 
 def _api_prefix():
@@ -174,6 +192,7 @@ async def connect_websocket():
                     user = p['d'].get('user', {}).get('username', '?')
                     print(f'[qqbot] READY — user={user} session={sid}', flush=True)
                     save_session(sid)
+                    save_state(websocket='connected', bot_name=user, session_id=sid)
                 else:
                     print(f'[qqbot] unexpected identify response: {json.dumps(p)[:200]}', flush=True)
                     continue
@@ -214,6 +233,7 @@ async def connect_websocket():
                     content = d.get('content', '')
 
                     print(f'[qqbot] {"PM" if is_private else "Group"} from {uid}: {content[:80]}', flush=True)
+                    save_state(last_message_time=time.strftime('%Y-%m-%d %H:%M:%S'))
 
                     reply = await forward_to_mother(content, uid)
                     if reply:
@@ -234,6 +254,7 @@ async def connect_websocket():
 
         except Exception as e:
             print(f'[qqbot] connection error: {e}', flush=True)
+            save_state(websocket='disconnected', last_error=str(e)[:200])
             await asyncio.sleep(5)
 
 

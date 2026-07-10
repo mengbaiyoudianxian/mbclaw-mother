@@ -30,13 +30,6 @@ async def _start_gateway():
 
     adapters = [WechatAdapter()]
 
-    if os.environ.get('MBCLAW_QQBOT_DISABLE') != '1':
-        try:
-            from gateway.adapters.qqbot import QQBotAdapter
-            adapters.insert(0, QQBotAdapter())
-        except Exception:
-            pass
-
     for a in adapters:
         a.set_on_message(on_channel_message)
         register(a)
@@ -73,6 +66,43 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True, "version": "2.0.0", "owner": cfg.owner_name}
+
+
+@app.get("/health/qqbot")
+def health_qqbot():
+    """QQBot Bridge 状态检查 — 读取独立 bridge 进程写入的状态文件"""
+    import json, os
+    state_file = '/tmp/mbclaw_qqbot_state.json'
+    try:
+        if os.path.exists(state_file):
+            with open(state_file) as f:
+                state = json.load(f)
+            return {
+                'ok': state.get('websocket') == 'connected',
+                'websocket': state.get('websocket', 'unknown'),
+                'bot_name': state.get('bot_name', ''),
+                'session_id': state.get('session_id', ''),
+                'last_message_time': state.get('last_message_time', ''),
+                'last_error': state.get('last_error', ''),
+                'updated': state.get('updated', 0),
+            }
+        return {
+            'ok': False,
+            'websocket': 'unknown',
+            'bot_name': '',
+            'session_id': '',
+            'last_message_time': '',
+            'last_error': 'state file not found',
+        }
+    except Exception as e:
+        return {
+            'ok': False,
+            'websocket': 'error',
+            'bot_name': '',
+            'session_id': '',
+            'last_message_time': '',
+            'last_error': str(e)[:200],
+        }
 
 
 @app.post("/gateway/wechat/login")

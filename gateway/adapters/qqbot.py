@@ -60,7 +60,7 @@ class QQBotAdapter(AdapterBase):
             await self._ws.send(json.dumps({
                 'op': 2, 'd': {
                     'token': f'QQBot {token}',
-                    'intents': 402653184,  # original working value: INTERACTION | MESSAGE_AUDIT
+                    'intents': 436207616,  # (1<<25)|(1<<27)|(1<<28) GROUP_AND_C2C_EVENT | INTERACTION | MESSAGE_AUDIT
                     'shard': [0, 1],
                     'properties': {},
                 }
