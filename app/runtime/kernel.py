@@ -353,6 +353,49 @@ class MBOSKernel:
                 payload={"task_name": task.name, "required_capability": task.required_capability},
             ))
 
+        # ── Phase 3.5: LLM Execution — generate natural-language reply ──
+        # Restored from v0.1 _execute() loop.
+        # Scheduler did worker assignment; now call LLM for actual response.
+        try:
+            from app.llm import LLMClient
+            llm = LLMClient()
+            schedule_summary = ", ".join(
+                f"{r.task_id}→{r.worker_id}" for r in schedule_results if r.success
+            )
+            llm_messages = [
+                {"role": "system", "content": (
+                    "你是母体-小梦，MBclaw 智能助手。"
+                    "用自然、友好的中文回复用户。"
+                    "以下是系统内部规划信息，仅作参考，不要直接输出给用户：\n"
+                    f"任务规划: {task_graph.goal}\n"
+                    f"调度结果: {schedule_summary}"
+                )},
+                {"role": "user", "content": message},
+            ]
+            llm_reply = llm.chat(llm_messages)
+            # Only use LLM reply if it's not an error
+            if llm_reply and not llm_reply.startswith("[LLM错误]"):
+                reply = llm_reply
+            else:
+                raise RuntimeError(llm_reply)
+        except Exception:
+            # Fallback: template reply (preserved from v0.2)
+            scheduled_count = sum(1 for r in schedule_results if r.success)
+            failed_schedules = [r for r in schedule_results if not r.success]
+            if failed_schedules:
+                reply = (
+                    f"任务规划完成: {task_graph.goal}\n"
+                    f"共 {len(task_graph.tasks)} 个任务, "
+                    f"成功调度 {scheduled_count} 个\n"
+                    f"失败: {'; '.join(r.reason for r in failed_schedules)}"
+                )
+            else:
+                reply = (
+                    f"任务规划完成: {task_graph.goal}\n"
+                    f"共 {len(task_graph.tasks)} 个任务, "
+                    f"全部调度成功"
+                )
+
         # ── Phase 4: Audit + Result ──
         self.event_bus.publish(ExecutionFinishEvent(
             event_id=str(uuid.uuid4()),
@@ -373,26 +416,8 @@ class MBOSKernel:
         self.state.set("current_goal", task_graph.goal)
         self.state.set("active_tasks", [t.id for t in task_graph.tasks])
 
-        # Build reply
-        scheduled_count = sum(1 for r in schedule_results if r.success)
-        failed_schedules = [r for r in schedule_results if not r.success]
-
-        if failed_schedules:
-            reply = (
-                f"任务规划完成: {task_graph.goal}\n"
-                f"共 {len(task_graph.tasks)} 个任务, "
-                f"成功调度 {scheduled_count} 个\n"
-                f"失败: {'; '.join(r.reason for r in failed_schedules)}"
-            )
-        else:
-            reply = (
-                f"任务规划完成: {task_graph.goal}\n"
-                f"共 {len(task_graph.tasks)} 个任务, "
-                f"全部调度成功"
-            )
-
         return PipelineResult(
-            success=len(failed_schedules) == 0,
+            success=len([r for r in schedule_results if not r.success]) == 0,
             goal=task_graph.goal,
             reply=reply,
             task_graph=task_graph,
