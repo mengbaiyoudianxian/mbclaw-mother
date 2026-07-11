@@ -24,7 +24,13 @@ class LLMClient:
         self.api_key = api_key if api_key is not None else os.getenv("MBCLAW_LLM_API_KEY", "")
         self.model = model or os.getenv("MBCLAW_LLM_MODEL", "")
         self._mock = os.getenv("MBCLAW_LLM_MOCK") == "1"
-        if not self.base_url:
+        # ── TokenPool proxy fallback (restored from v0.1) ──
+        # If no env vars, use the local TokenPool proxy at port 8100.
+        # TokenPool handles key routing, quotas, and failover internally.
+        if not self.api_key and not self.base_url:
+            self.base_url = "http://127.0.0.1:8100/v1"
+            self.api_key = ""  # TokenPool proxy doesn't require auth key
+        elif not self.base_url:
             self.base_url = "https://api.openai.com/v1"
         if not self.model:
             self.model = "gpt-4o-mini"
