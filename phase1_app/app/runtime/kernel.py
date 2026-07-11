@@ -144,7 +144,7 @@ class MotherRuntime:
             return fail_result
 
         try:
-            result = self._execute(message, session_id, max_turns, llm_client)
+            result = self._execute(message, session_id, max_turns, llm_client, request_id)
             exec_result = Lifecycle.collect(ctx, output=result.get("reply", ""),
                                             error=result.get("error"))
 
@@ -172,7 +172,8 @@ class MotherRuntime:
             return fail_result
 
     def _execute(self, message: str, session_id: int,
-                 max_turns: int, llm_client=None) -> dict:
+                 max_turns: int, llm_client=None,
+                 request_id: str = "") -> dict:
         """Internal execution loop — ToolRuntime v1.1 integrated."""
         wm = self._get_session(session_id)
         wm.add("user", message)
